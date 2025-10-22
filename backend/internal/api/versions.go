@@ -110,7 +110,8 @@ func (h *AppHandler) CreateVersion(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Start build process in background
-	go h.Builder.BuildApp(r.Context(), version.ID, appID, "", comments)
+	// Pass empty string for ownerEmail since admin user was created during app creation
+	go h.Builder.BuildApp(r.Context(), version.ID, appID, "", comments, "")
 
 	middleware.RespondJSON(w, http.StatusCreated, version)
 }

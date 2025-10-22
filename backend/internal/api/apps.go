@@ -54,6 +54,13 @@ func (h *AppHandler) CreateApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Get owner email for app creation
+	ownerEmail, err := h.AppService.GetOwnerEmail(r.Context(), user.Sub)
+	if err != nil {
+		middleware.RespondError(w, http.StatusInternalServerError, "Failed to get owner email")
+		return
+	}
+
 	// Create initial version
 	version, err := h.VersionService.CreateVersion(r.Context(), app.ID)
 	if err != nil {
@@ -62,7 +69,8 @@ func (h *AppHandler) CreateApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Start build process in background with new context (not request context)
-	go h.Builder.BuildApp(context.Background(), version.ID, app.ID, req.Requirements, nil)
+	// Pass owner email to create admin user in app
+	go h.Builder.BuildApp(context.Background(), version.ID, app.ID, req.Requirements, nil, ownerEmail)
 
 	middleware.RespondJSON(w, http.StatusCreated, map[string]interface{}{
 		"app":     app,

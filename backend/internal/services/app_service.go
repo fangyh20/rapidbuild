@@ -179,3 +179,41 @@ func (s *AppService) DeleteApp(ctx context.Context, appID, userID string) error 
 
 	return nil
 }
+
+// GetOwnerEmail retrieves the email of the app owner
+func (s *AppService) GetOwnerEmail(ctx context.Context, userID string) (string, error) {
+	var email string
+	query := `SELECT email FROM users WHERE id = $1`
+
+	err := s.DB.QueryRow(ctx, query, userID).Scan(&email)
+	if err != nil {
+		return "", fmt.Errorf("failed to get owner email: %w", err)
+	}
+
+	return email, nil
+}
+
+// GetAppWithOwnerEmail retrieves app and owner email for preview token generation
+func (s *AppService) GetAppWithOwnerEmail(ctx context.Context, appID, userID string) (*models.App, string, error) {
+	var email string
+	app := &models.App{}
+
+	query := `
+		SELECT a.id, a.user_id, a.name, a.description, a.status, a.prod_version,
+		       a.created_at, a.updated_at, u.email
+		FROM apps a
+		JOIN users u ON a.user_id = u.id
+		WHERE a.id = $1 AND a.user_id = $2
+	`
+
+	err := s.DB.QueryRow(ctx, query, appID, userID).Scan(
+		&app.ID, &app.UserID, &app.Name, &app.Description, &app.Status,
+		&app.ProdVersion, &app.CreatedAt, &app.UpdatedAt, &email,
+	)
+
+	if err != nil {
+		return nil, "", fmt.Errorf("app not found: %w", err)
+	}
+
+	return app, email, nil
+}

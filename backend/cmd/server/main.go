@@ -21,6 +21,8 @@ import (
 	"github.com/rapidbuildapp/rapidbuild/internal/middleware"
 	"github.com/rapidbuildapp/rapidbuild/internal/services"
 	"github.com/rapidbuildapp/rapidbuild/internal/worker"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 func main() {
@@ -40,6 +42,27 @@ func main() {
 	defer pgClient.Close()
 
 	log.Println("Successfully connected to PostgreSQL database")
+
+	// Initialize MongoDB client
+	mongoCtx, mongoCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer mongoCancel()
+
+	mongoClient, err := mongo.Connect(mongoCtx, options.Client().ApplyURI(cfg.MongoURL))
+	if err != nil {
+		log.Fatalf("Failed to connect to MongoDB: %v", err)
+	}
+	defer func() {
+		if err := mongoClient.Disconnect(context.Background()); err != nil {
+			log.Printf("Error disconnecting MongoDB: %v", err)
+		}
+	}()
+
+	// Ping MongoDB to verify connection
+	if err := mongoClient.Ping(mongoCtx, nil); err != nil {
+		log.Fatalf("Failed to ping MongoDB: %v", err)
+	}
+
+	log.Println("Successfully connected to MongoDB")
 
 	// Initialize AWS S3 client
 	awsCfg, err := config.LoadDefaultConfig(context.Background(),
@@ -68,12 +91,13 @@ func main() {
 	vercelService := services.NewVercelService(cfg)
 
 	// Initialize worker
-	builder := worker.NewBuilder(cfg, versionService, vercelService, s3Client)
+	builder := worker.NewBuilder(cfg, appService, versionService, vercelService, s3Client)
 
 	// Initialize API handlers
 	authHandler := api.NewAuthHandler(authService, oauthService, cfg)
 	appHandler := api.NewAppHandler(appService, versionService, commentService, builder)
 	uploadHandler := api.NewUploadHandler(uploadService)
+	previewHandler := api.NewPreviewHandler(appService, versionService, mongoClient)
 
 	// Setup router
 	r := mux.NewRouter()
@@ -110,6 +134,7 @@ func main() {
 	api.HandleFunc("/apps", appHandler.CreateApp).Methods("POST", "OPTIONS")
 	api.HandleFunc("/apps/{id}", appHandler.GetApp).Methods("GET", "OPTIONS")
 	api.HandleFunc("/apps/{id}", appHandler.DeleteApp).Methods("DELETE", "OPTIONS")
+	api.HandleFunc("/apps/{id}/preview-token", previewHandler.GeneratePreviewToken).Methods("POST", "OPTIONS")
 
 	// Version routes
 	api.HandleFunc("/apps/{appId}/versions", appHandler.ListVersions).Methods("GET", "OPTIONS")

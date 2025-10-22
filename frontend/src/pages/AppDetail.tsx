@@ -30,9 +30,11 @@ export function AppDetail() {
   const [chatMessage, setChatMessage] = useState('')
   const [actionRequest, setActionRequest] = useState('')
   const [selectedVersion, setSelectedVersion] = useState<string | null>(null)
+  const [viewingVersion, setViewingVersion] = useState<string | null>(null)
   const [buildProgress, setBuildProgress] = useState<BuildProgress | null>(null)
   const [showCommentForm, setShowCommentForm] = useState(false)
   const [iframeRef, setIframeRef] = useState<HTMLIFrameElement | null>(null)
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null)
 
   const { data: app } = useQuery({
     queryKey: ['app', id],
@@ -94,6 +96,28 @@ export function AppDetail() {
     setShowCommentForm(false)
   }
 
+  const handlePreviewVersion = async (versionId: string) => {
+    setViewingVersion(versionId)
+    setSelectedVersion(selectedVersion === versionId ? null : versionId)
+
+    // Generate preview token
+    try {
+      const response = await api.generatePreviewToken(id!)
+      const { token, previewUrl: baseUrl } = response.data
+
+      // Append token to preview URL
+      const urlWithToken = `${baseUrl}?token=${encodeURIComponent(token)}`
+      setPreviewUrl(urlWithToken)
+    } catch (error) {
+      console.error('Failed to generate preview token:', error)
+      // Fallback to normal URL without token
+      const version = versions?.find(v => v.id === versionId)
+      if (version?.vercel_url) {
+        setPreviewUrl(version.vercel_url)
+      }
+    }
+  }
+
   const handleAddComment = () => {
     if (!commentText.trim()) return
 
@@ -152,25 +176,37 @@ export function AppDetail() {
   }
 
   const latestVersion = versions?.[versions.length - 1]
+  const currentViewingVersion = versions?.find(v => v.id === viewingVersion)
 
-  // Stream build progress if latest version is building
+  // Auto-select latest version on mount or when versions change
   useEffect(() => {
-    if (latestVersion?.status === 'building' || latestVersion?.status === 'pending') {
-      const eventSource = api.streamBuildProgress(latestVersion.id, (progress) => {
+    if (!viewingVersion && latestVersion) {
+      handlePreviewVersion(latestVersion.id)
+    }
+  }, [latestVersion?.id, viewingVersion])
+
+  // Stream build progress if viewing version is building
+  useEffect(() => {
+    if (currentViewingVersion?.status === 'building' || currentViewingVersion?.status === 'pending') {
+      const eventSource = api.streamBuildProgress(currentViewingVersion.id, (progress) => {
         setBuildProgress(progress)
 
         if (progress.status === 'completed' || progress.status === 'failed') {
           queryClient.invalidateQueries({ queryKey: ['versions', id] })
+          queryClient.invalidateQueries({ queryKey: ['app', id] })
         }
       })
 
       return () => eventSource.close()
+    } else {
+      // Clear progress if not building
+      setBuildProgress(null)
     }
-  }, [latestVersion?.id, latestVersion?.status, id, queryClient])
+  }, [currentViewingVersion?.id, currentViewingVersion?.status, id, queryClient])
 
   // Enable/disable element picking in iframe when mode changes
   useEffect(() => {
-    if (!iframeRef || !latestVersion?.vercel_url) return
+    if (!iframeRef || !previewUrl) return
 
     const handleMessage = (event: MessageEvent) => {
       // Accept messages from iframe (element selector in deployed app)
@@ -186,7 +222,7 @@ export function AppDetail() {
     return () => {
       window.removeEventListener('message', handleMessage)
     }
-  }, [iframeRef, latestVersion?.vercel_url])
+  }, [iframeRef, previewUrl])
 
   // Send message to iframe when mode changes
   useEffect(() => {
@@ -262,7 +298,7 @@ export function AppDetail() {
       <div className="flex-1 flex overflow-hidden">
         {/* App Preview */}
         <div className="flex-1 bg-gray-100 p-4 overflow-auto">
-          {latestVersion?.vercel_url ? (
+          {previewUrl ? (
             <div className="h-full bg-white rounded-lg shadow relative">
               {mode === 'edit' && (
                 <div className="absolute top-0 left-0 right-0 bg-blue-600 text-white text-sm py-2 px-4 z-10 flex items-center justify-center">
@@ -272,18 +308,28 @@ export function AppDetail() {
               )}
               <iframe
                 ref={setIframeRef}
-                src={latestVersion.vercel_url}
+                src={previewUrl}
                 className={`w-full h-full rounded-lg ${mode === 'edit' ? 'mt-10' : ''}`}
                 title="App Preview"
               />
             </div>
-          ) : latestVersion?.status === 'building' || latestVersion?.status === 'pending' ? (
+          ) : currentViewingVersion?.status === 'building' || currentViewingVersion?.status === 'pending' ? (
             <div className="h-full flex items-center justify-center bg-white rounded-lg shadow">
               <div className="text-center">
                 <Loader2 className="h-12 w-12 text-blue-600 animate-spin mx-auto mb-4" />
                 <h3 className="text-lg font-medium text-gray-900">Building your app...</h3>
                 {buildProgress && (
                   <p className="mt-2 text-sm text-gray-600">{buildProgress.message}</p>
+                )}
+              </div>
+            </div>
+          ) : currentViewingVersion?.status === 'failed' ? (
+            <div className="h-full flex items-center justify-center bg-white rounded-lg shadow">
+              <div className="text-center max-w-md">
+                <XCircle className="h-12 w-12 text-red-600 mx-auto mb-4" />
+                <h3 className="text-lg font-medium text-gray-900 mb-2">Build Failed</h3>
+                {currentViewingVersion.error_message && (
+                  <p className="text-sm text-gray-600">{currentViewingVersion.error_message}</p>
                 )}
               </div>
             </div>
@@ -337,11 +383,11 @@ export function AppDetail() {
                     <div
                       key={version.id}
                       className={`border rounded-lg p-3 cursor-pointer transition-colors ${
-                        selectedVersion === version.id
+                        viewingVersion === version.id
                           ? 'border-blue-500 bg-blue-50'
                           : 'border-gray-200 hover:border-gray-300'
                       }`}
-                      onClick={() => setSelectedVersion(selectedVersion === version.id ? null : version.id)}
+                      onClick={() => handlePreviewVersion(version.id)}
                     >
                       <div className="flex items-center justify-between mb-2">
                         <div className="flex items-center space-x-2">

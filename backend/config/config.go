@@ -13,6 +13,9 @@ type Config struct {
 	// Database (Neon PostgreSQL)
 	DatabaseURL string
 
+	// MongoDB (for app management)
+	MongoURL string
+
 	// JWT
 	JWTSecret         string
 	JWTExpiry         time.Duration
@@ -39,10 +42,6 @@ type Config struct {
 	// Vercel
 	VercelToken string
 
-	// RESTHeart (MongoDB API)
-	RestHeartURL    string
-	RestHeartAPIKey string
-
 	// Workspace
 	WorkspaceDir   string
 	StarterCodeDir string
@@ -63,6 +62,9 @@ func Load() *Config {
 
 		// Database
 		DatabaseURL: getEnv("DATABASE_URL", ""),
+
+		// MongoDB
+		MongoURL: getEnv("MONGO_URL", "mongodb+srv://admin:fangyhadm@appbase.a7nhdfn.mongodb.net/?retryWrites=true&w=majority&appName=appbase"),
 
 		// JWT
 		JWTSecret:          getEnv("JWT_SECRET", ""),
@@ -89,10 +91,6 @@ func Load() *Config {
 
 		// Vercel
 		VercelToken: getEnv("VERCEL_TOKEN", ""),
-
-		// RESTHeart
-		RestHeartURL:    getEnv("RESTHEART_URL", "https://api.rapidbuild.app"),
-		RestHeartAPIKey: getEnv("RESTHEART_API_KEY", ""),
 
 		// Workspace
 		WorkspaceDir:   getEnv("WORKSPACE_DIR", "/tmp/rapidbuild-workspaces"),

@@ -144,4 +144,8 @@ export const api = {
 
     return eventSource
   },
+
+  // Preview Token
+  generatePreviewToken: (appId: string) =>
+    apiClient.post<{ token: string; previewUrl: string }>(`/apps/${appId}/preview-token`),
 }

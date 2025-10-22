@@ -24,15 +24,17 @@ import (
 
 type Builder struct {
 	Config         *config.Config
+	AppService     *services.AppService
 	VersionService *services.VersionService
 	VercelService  *services.VercelService
 	S3Client       *s3.Client
 	ProgressChan   chan models.BuildProgress
 }
 
-func NewBuilder(cfg *config.Config, versionService *services.VersionService, vercelService *services.VercelService, s3Client *s3.Client) *Builder {
+func NewBuilder(cfg *config.Config, appService *services.AppService, versionService *services.VersionService, vercelService *services.VercelService, s3Client *s3.Client) *Builder {
 	return &Builder{
 		Config:         cfg,
+		AppService:     appService,
 		VersionService: versionService,
 		VercelService:  vercelService,
 		S3Client:       s3Client,
@@ -66,7 +68,7 @@ func findClaudePath() string {
 }
 
 // BuildApp orchestrates the entire build process
-func (b *Builder) BuildApp(ctx context.Context, versionID, appID, requirements string, comments []models.Comment) error {
+func (b *Builder) BuildApp(ctx context.Context, versionID, appID, requirements string, comments []models.Comment, ownerEmail string) error {
 	// Add panic recovery
 	defer func() {
 		if r := recover(); r != nil {
@@ -151,7 +153,7 @@ func (b *Builder) BuildApp(ctx context.Context, versionID, appID, requirements s
 	schemasDir := filepath.Join(workspaceDir, "schemas")
 	if _, err := os.Stat(schemasDir); err == nil {
 		b.sendProgress(versionID, "building", "Setting up database schema...")
-		if err := b.setupDatabase(ctx, schemasDir, appID); err != nil {
+		if err := b.setupDatabase(ctx, schemasDir, appID, ownerEmail); err != nil {
 			// Log warning but don't fail the build - database setup is optional
 			log.Printf("[BuildApp] Warning: Failed to setup database for app %s: %v\n", appID, err)
 		}
@@ -220,6 +222,15 @@ func (b *Builder) BuildApp(ctx context.Context, versionID, appID, requirements s
 	if err != nil {
 		log.Printf("[BuildApp] ERROR updating completion status for version %s: %v\n", versionID, err)
 		return b.handleError(ctx, versionID, "Failed to mark as completed", err)
+	}
+
+	// Update app status to active
+	_, err = b.AppService.UpdateApp(ctx, appID, "", map[string]interface{}{
+		"status": "active",
+	})
+	if err != nil {
+		log.Printf("[BuildApp] Warning: Failed to update app status for app %s: %v\n", appID, err)
+		// Don't fail the build if app status update fails
 	}
 
 	log.Printf("[BuildApp] ✅ Build completed successfully for version %s\n", versionID)
@@ -778,23 +789,36 @@ func (b *Builder) handleError(ctx context.Context, versionID, message string, er
 		log.Printf("[BuildApp] Failed to update version with error: %v\n", updateErr)
 	}
 
+	// Get the app ID from the version
+	version, getErr := b.VersionService.GetVersion(ctx, versionID)
+	if getErr == nil {
+		// Update app status to error
+		_, appErr := b.AppService.UpdateApp(ctx, version.AppID, "", map[string]interface{}{
+			"status": "error",
+		})
+		if appErr != nil {
+			log.Printf("[BuildApp] Warning: Failed to update app status: %v\n", appErr)
+		}
+	}
+
 	return fmt.Errorf(fullMsg)
 }
 
 // setupDatabase creates app database and collections using app-manager CLI
-func (b *Builder) setupDatabase(ctx context.Context, schemasDir, appID string) error {
-	log.Printf("[Database] Setting up database for app %s with schemas from %s\n", appID, schemasDir)
+func (b *Builder) setupDatabase(ctx context.Context, schemasDir, appID, ownerEmail string) error {
+	log.Printf("[Database] Setting up database for app %s (owner: %s) with schemas from %s\n", appID, ownerEmail, schemasDir)
 
 	// Create context with timeout (2 minutes for database setup)
 	dbCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
-	// Run app-manager schemas command
-	cmd := exec.CommandContext(dbCtx, "app-manager", "schemas", appID, "--dir", schemasDir)
+	// Run app-manager create command with owner email
+	// This creates both the database AND all collections AND admin user in one call
+	cmd := exec.CommandContext(dbCtx, "app-manager", "create", appID, "--schemas", schemasDir, "--owner-email", ownerEmail)
 
-	// Set environment variables
+	// Set environment variables (include pnpm path where app-manager is installed)
 	cmd.Env = append(os.Environ(),
-		"PATH=/usr/local/bin:/usr/bin:/bin",
+		"PATH=/home/ubuntu/.local/share/pnpm:/usr/local/bin:/usr/bin:/bin",
 	)
 
 	// Capture output
@@ -822,6 +846,6 @@ func (b *Builder) setupDatabase(ctx context.Context, schemasDir, appID string) e
 		return fmt.Errorf("app-manager failed: %s", strings.TrimSpace(errorMsg))
 	}
 
-	log.Printf("[Database] Database setup completed for app %s\n", appID)
+	log.Printf("[Database] ✅ Database setup completed for app %s\n", appID)
 	return nil
 }
