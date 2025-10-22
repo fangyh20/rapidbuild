@@ -100,6 +100,14 @@ export function AppDetail() {
     setViewingVersion(versionId)
     setSelectedVersion(selectedVersion === versionId ? null : versionId)
 
+    const version = versions?.find(v => v.id === versionId)
+
+    // Only generate preview token for completed versions
+    if (version?.status !== 'completed' || !version?.vercel_url) {
+      setPreviewUrl(null)
+      return
+    }
+
     // Generate preview token
     try {
       const response = await api.generatePreviewToken(id!)
@@ -111,7 +119,6 @@ export function AppDetail() {
     } catch (error) {
       console.error('Failed to generate preview token:', error)
       // Fallback to normal URL without token
-      const version = versions?.find(v => v.id === versionId)
       if (version?.vercel_url) {
         setPreviewUrl(version.vercel_url)
       }
@@ -180,8 +187,11 @@ export function AppDetail() {
 
   // Auto-select latest version on mount or when versions change
   useEffect(() => {
-    if (!viewingVersion && latestVersion) {
+    if (!viewingVersion && latestVersion && latestVersion.status === 'completed') {
       handlePreviewVersion(latestVersion.id)
+    } else if (!viewingVersion && latestVersion && (latestVersion.status === 'building' || latestVersion.status === 'pending')) {
+      // Just set viewing version without generating preview token for building versions
+      setViewingVersion(latestVersion.id)
     }
   }, [latestVersion?.id, viewingVersion])
 
@@ -203,6 +213,13 @@ export function AppDetail() {
       setBuildProgress(null)
     }
   }, [currentViewingVersion?.id, currentViewingVersion?.status, id, queryClient])
+
+  // Auto-load preview when viewing version completes building
+  useEffect(() => {
+    if (currentViewingVersion?.status === 'completed' && currentViewingVersion?.vercel_url && !previewUrl) {
+      handlePreviewVersion(currentViewingVersion.id)
+    }
+  }, [currentViewingVersion?.status, currentViewingVersion?.vercel_url, currentViewingVersion?.id, previewUrl])
 
   // Enable/disable element picking in iframe when mode changes
   useEffect(() => {
