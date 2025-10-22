@@ -15,7 +15,6 @@ import {
   CheckCircle2,
   XCircle,
   Clock,
-  ExternalLink,
 } from 'lucide-react'
 
 export function AppDetail() {
@@ -29,12 +28,12 @@ export function AppDetail() {
   const [commentText, setCommentText] = useState('')
   const [chatMessage, setChatMessage] = useState('')
   const [actionRequest, setActionRequest] = useState('')
-  const [selectedVersion, setSelectedVersion] = useState<string | null>(null)
   const [viewingVersion, setViewingVersion] = useState<string | null>(null)
   const [buildProgress, setBuildProgress] = useState<BuildProgress | null>(null)
   const [showCommentForm, setShowCommentForm] = useState(false)
   const [iframeRef, setIframeRef] = useState<HTMLIFrameElement | null>(null)
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
+  const [popupPosition, setPopupPosition] = useState<{ x: number; y: number } | null>(null)
 
   const { data: app } = useQuery({
     queryKey: ['app', id],
@@ -52,13 +51,27 @@ export function AppDetail() {
     },
   })
 
-  const { data: draftComments } = useQuery({
+  const { data: allComments } = useQuery({
     queryKey: ['comments', id],
     queryFn: async () => {
       const response = await api.getComments(id!)
       return response.data
     },
   })
+
+  // Filter draft comments (status = 'draft' or no version_id)
+  const draftComments = allComments?.filter((c: any) => c.status === 'draft' || !c.version_id)
+
+  // Group comments by version_id for submitted comments
+  const commentsByVersion = allComments?.reduce((acc: any, comment: any) => {
+    if (comment.version_id) {
+      if (!acc[comment.version_id]) {
+        acc[comment.version_id] = []
+      }
+      acc[comment.version_id].push(comment)
+    }
+    return acc
+  }, {})
 
   const addCommentMutation = useMutation({
     mutationFn: (data: { page_path: string; element_path: string; content: string }) =>
@@ -69,6 +82,22 @@ export function AppDetail() {
       setSelectedElement('')
       setShowCommentForm(false)
       setActionRequest('')
+      setPopupPosition(null)
+
+      // Re-launch element selector if in edit mode
+      if (mode === 'edit' && iframeRef?.contentWindow) {
+        setTimeout(() => {
+          iframeRef.contentWindow?.postMessage({ type: 'LAUNCH_ELEMENT_SELECTOR' }, '*')
+          console.log('[AppDetail] Re-launching element selector after comment submission')
+        }, 100)
+      }
+    },
+  })
+
+  const deleteCommentMutation = useMutation({
+    mutationFn: (commentId: string) => api.deleteComment(id!, commentId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['comments', id] })
     },
   })
 
@@ -94,11 +123,19 @@ export function AppDetail() {
     setCommentText('')
     setSelectedElement('')
     setShowCommentForm(false)
+    setPopupPosition(null)
+
+    // Re-launch element selector if in edit mode
+    if (mode === 'edit' && iframeRef?.contentWindow) {
+      setTimeout(() => {
+        iframeRef.contentWindow?.postMessage({ type: 'LAUNCH_ELEMENT_SELECTOR' }, '*')
+        console.log('[AppDetail] Re-launching element selector after cancel')
+      }, 100)
+    }
   }
 
   const handlePreviewVersion = async (versionId: string) => {
     setViewingVersion(versionId)
-    setSelectedVersion(selectedVersion === versionId ? null : versionId)
 
     const version = versions?.find(v => v.id === versionId)
 
@@ -183,17 +220,18 @@ export function AppDetail() {
   }
 
   const latestVersion = versions?.[versions.length - 1]
+  const latestCompletedVersion = versions?.slice().reverse().find(v => v.status === 'completed')
   const currentViewingVersion = versions?.find(v => v.id === viewingVersion)
 
-  // Auto-select latest version on mount or when versions change
+  // Auto-select latest completed version on mount
   useEffect(() => {
-    if (!viewingVersion && latestVersion && latestVersion.status === 'completed') {
-      handlePreviewVersion(latestVersion.id)
+    if (!viewingVersion && latestCompletedVersion) {
+      handlePreviewVersion(latestCompletedVersion.id)
     } else if (!viewingVersion && latestVersion && (latestVersion.status === 'building' || latestVersion.status === 'pending')) {
-      // Just set viewing version without generating preview token for building versions
+      // If no completed version but latest is building, just set viewing version without preview
       setViewingVersion(latestVersion.id)
     }
-  }, [latestVersion?.id, viewingVersion])
+  }, [latestCompletedVersion?.id, latestVersion?.id, viewingVersion])
 
   // Stream build progress if viewing version is building
   useEffect(() => {
@@ -226,11 +264,23 @@ export function AppDetail() {
     if (!iframeRef || !previewUrl) return
 
     const handleMessage = (event: MessageEvent) => {
+      console.log('[AppDetail] Received message from iframe:', event.data)
+
       // Accept messages from iframe (element selector in deployed app)
       if (event.data.type === 'ELEMENT_SELECTED') {
+        console.log('[AppDetail] Element selected:', event.data.selector)
         setSelectedElement(event.data.selector)
         setShowCommentForm(true)
         setActiveTab('action')
+
+        // Calculate popup position based on iframe offset and mouse position
+        if (iframeRef && event.data.mouseX !== undefined && event.data.mouseY !== undefined) {
+          const iframeRect = iframeRef.getBoundingClientRect()
+          setPopupPosition({
+            x: iframeRect.left + event.data.mouseX,
+            y: iframeRect.top + event.data.mouseY,
+          })
+        }
       }
     }
 
@@ -243,18 +293,40 @@ export function AppDetail() {
 
   // Send message to iframe when mode changes
   useEffect(() => {
-    if (!iframeRef?.contentWindow) return
+    if (!iframeRef?.contentWindow || !previewUrl) return
 
-    try {
-      if (mode === 'edit') {
-        iframeRef.contentWindow.postMessage({ type: 'LAUNCH_ELEMENT_SELECTOR' }, '*')
-      } else {
-        iframeRef.contentWindow.postMessage({ type: 'STOP_ELEMENT_SELECTOR' }, '*')
+    // Wait for iframe to fully load before sending message
+    const sendMessage = () => {
+      try {
+        if (mode === 'edit' && iframeRef?.contentWindow) {
+          // Send message to launch element selector in deployed app
+          console.log('[AppDetail] Sending LAUNCH_ELEMENT_SELECTOR to iframe')
+          iframeRef.contentWindow.postMessage({ type: 'LAUNCH_ELEMENT_SELECTOR' }, '*')
+        } else if (mode === 'view' && iframeRef?.contentWindow) {
+          // Send message to stop element selector when switching to view mode
+          console.log('[AppDetail] Sending STOP_ELEMENT_SELECTOR to iframe')
+          iframeRef.contentWindow.postMessage({ type: 'STOP_ELEMENT_SELECTOR' }, '*')
+
+          // Close any open comment form
+          setShowCommentForm(false)
+          setCommentText('')
+          setSelectedElement('')
+          setPopupPosition(null)
+        }
+      } catch (error) {
+        console.error('[AppDetail] Failed to send message to iframe:', error)
       }
-    } catch (error) {
-      console.error('Failed to send message to iframe:', error)
     }
-  }, [mode, iframeRef])
+
+    // If switching to edit mode, wait a bit for iframe to be ready
+    if (mode === 'edit') {
+      const timer = setTimeout(sendMessage, 500)
+      return () => clearTimeout(timer)
+    } else if (mode === 'view') {
+      // Stop immediately when switching to view mode
+      sendMessage()
+    }
+  }, [mode, iframeRef, previewUrl])
 
   return (
     <div className="h-screen flex flex-col">
@@ -317,17 +389,12 @@ export function AppDetail() {
         <div className="flex-1 bg-gray-100 p-4 overflow-auto">
           {previewUrl ? (
             <div className="h-full bg-white rounded-lg shadow relative">
-              {mode === 'edit' && (
-                <div className="absolute top-0 left-0 right-0 bg-blue-600 text-white text-sm py-2 px-4 z-10 flex items-center justify-center">
-                  <Edit2 className="h-4 w-4 mr-2" />
-                  Edit Mode: Click on any element to add a comment
-                </div>
-              )}
               <iframe
                 ref={setIframeRef}
                 src={previewUrl}
-                className={`w-full h-full rounded-lg ${mode === 'edit' ? 'mt-10' : ''}`}
+                className="w-full h-full rounded-lg"
                 title="App Preview"
+                sandbox="allow-same-origin allow-scripts allow-forms allow-popups"
               />
             </div>
           ) : currentViewingVersion?.status === 'building' || currentViewingVersion?.status === 'pending' ? (
@@ -397,78 +464,61 @@ export function AppDetail() {
                 <h3 className="text-sm font-medium text-gray-900 mb-3">Version History</h3>
                 <div className="space-y-3">
                   {versions?.slice().reverse().map((version: Version) => (
-                    <div
-                      key={version.id}
-                      className={`border rounded-lg p-3 cursor-pointer transition-colors ${
-                        viewingVersion === version.id
-                          ? 'border-blue-500 bg-blue-50'
-                          : 'border-gray-200 hover:border-gray-300'
-                      }`}
-                      onClick={() => handlePreviewVersion(version.id)}
-                    >
-                      <div className="flex items-center justify-between mb-2">
-                        <div className="flex items-center space-x-2">
-                          {getStatusIcon(version.status)}
-                          <span className="text-sm font-medium text-gray-900">
-                            Version {version.version_number}
-                          </span>
+                    <div key={version.id} className="space-y-2">
+                      {/* Comments or Requirements for this version */}
+                      {version.version_number === 1 && version.requirements ? (
+                        <div className="bg-gray-50 border border-gray-200 rounded-lg p-3">
+                          <h4 className="text-xs font-semibold text-gray-700 mb-2">Initial Requirements</h4>
+                          <p className="text-xs text-gray-600 whitespace-pre-wrap">{version.requirements}</p>
                         </div>
-                        <span className={`text-xs px-2 py-1 rounded-full ${getStatusColor(version.status)}`}>
-                          {version.status}
-                        </span>
+                      ) : commentsByVersion?.[version.id] && commentsByVersion[version.id].length > 0 ? (
+                        <div className="bg-amber-50 border border-amber-200 rounded-lg p-3">
+                          <h4 className="text-xs font-semibold text-gray-700 mb-2">
+                            Changes Requested ({commentsByVersion[version.id].length})
+                          </h4>
+                          <div className="space-y-2">
+                            {commentsByVersion[version.id].map((comment: any) => (
+                              <div key={comment.id} className="text-xs">
+                                <span className="text-gray-500 font-mono">[{comment.element_path}]</span>
+                                <p className="text-gray-700 mt-0.5">{comment.content}</p>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      ) : null}
+
+                      {/* Version Card */}
+                      <div
+                        className={`border rounded-lg p-2 transition-colors ${
+                          viewingVersion === version.id
+                            ? 'border-blue-500 bg-blue-50'
+                            : 'border-gray-200'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center space-x-2 flex-1">
+                            {getStatusIcon(version.status)}
+                            <span className="text-sm font-medium text-gray-900">
+                              Version {version.version_number}
+                            </span>
+                            <span className={`text-xs px-2 py-0.5 rounded-full ${getStatusColor(version.status)}`}>
+                              {version.status}
+                            </span>
+                          </div>
+                          {version.status === 'completed' && version.vercel_url && (
+                            <button
+                              onClick={() => handlePreviewVersion(version.id)}
+                              className="ml-2 px-3 py-1 bg-blue-600 text-white text-xs font-medium rounded hover:bg-blue-700"
+                            >
+                              View
+                            </button>
+                          )}
+                        </div>
+
+                        <p className="text-xs text-gray-500 mt-1 ml-6">
+                          {new Date(version.created_at).toLocaleString()}
+                        </p>
                       </div>
-
-                      {version.vercel_url && (
-                        <a
-                          href={version.vercel_url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-xs text-blue-600 hover:text-blue-800 flex items-center mb-2"
-                          onClick={(e) => e.stopPropagation()}
-                        >
-                          <ExternalLink className="h-3 w-3 mr-1" />
-                          View deployment
-                        </a>
-                      )}
-
-                      <p className="text-xs text-gray-500">
-                        {new Date(version.created_at).toLocaleString()}
-                      </p>
-
-                      {/* Expanded version details */}
-                      {selectedVersion === version.id && (
-                        <div className="mt-3 pt-3 border-t space-y-3">
-                          {/* Build Log */}
-                          {version.build_log && (
-                            <div>
-                              <h4 className="text-xs font-medium text-gray-700 mb-1">Build Log:</h4>
-                              <div className="bg-gray-900 text-gray-100 text-xs p-2 rounded max-h-40 overflow-auto font-mono">
-                                {version.build_log}
-                              </div>
-                            </div>
-                          )}
-
-                          {/* Error Message */}
-                          {version.error_message && (
-                            <div>
-                              <h4 className="text-xs font-medium text-red-700 mb-1">Error:</h4>
-                              <div className="bg-red-50 text-red-900 text-xs p-2 rounded">
-                                {version.error_message}
-                              </div>
-                            </div>
-                          )}
-
-                          {/* Requirements */}
-                          {version.requirements && (
-                            <div>
-                              <h4 className="text-xs font-medium text-gray-700 mb-1">Requirements:</h4>
-                              <div className="bg-gray-50 text-gray-900 text-xs p-2 rounded">
-                                {version.requirements}
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      )}
                     </div>
                   ))}
 
@@ -486,9 +536,16 @@ export function AppDetail() {
                   </h4>
                   <div className="space-y-2">
                     {draftComments.map((comment: any) => (
-                      <div key={comment.id} className="bg-white p-2 rounded shadow-sm">
-                        <div className="text-xs text-gray-500 mb-1">[{comment.element_path}]</div>
-                        <div className="text-sm text-gray-900">{comment.content}</div>
+                      <div key={comment.id} className="bg-white p-2 rounded shadow-sm relative group">
+                        <button
+                          onClick={() => deleteCommentMutation.mutate(comment.id)}
+                          className="absolute top-2 right-2 text-gray-400 hover:text-red-600 opacity-0 group-hover:opacity-100 transition-opacity"
+                          title="Delete comment"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </button>
+                        <div className="text-xs text-gray-500 mb-1 pr-6">[{comment.element_path}]</div>
+                        <div className="text-sm text-gray-900 pr-6">{comment.content}</div>
                         <div className="text-xs text-gray-400 mt-1">
                           {new Date(comment.created_at).toLocaleString()}
                         </div>
@@ -498,68 +555,6 @@ export function AppDetail() {
                 </div>
               )}
 
-              {/* Element Comment Input (shown when element is selected) */}
-              {showCommentForm && (
-                <div className="border-t p-4 bg-blue-50">
-                  <div className="flex items-center justify-between mb-3">
-                    <h4 className="text-sm font-medium text-gray-900">Element Comment</h4>
-                    <button
-                      onClick={handleCancelComment}
-                      className="text-gray-500 hover:text-gray-700"
-                    >
-                      ×
-                    </button>
-                  </div>
-                  <div className="space-y-3">
-                    <div>
-                      <label className="block text-xs text-gray-600 mb-1">Selected Element</label>
-                      <input
-                        type="text"
-                        value={selectedElement}
-                        onChange={(e) => setSelectedElement(e.target.value)}
-                        placeholder="Element selector"
-                        className="block w-full px-3 py-2 border border-gray-300 rounded-md text-sm bg-white"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs text-gray-600 mb-1">Comment</label>
-                      <textarea
-                        value={commentText}
-                        onChange={(e) => setCommentText(e.target.value)}
-                        placeholder="Describe the change you want..."
-                        rows={3}
-                        className="block w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
-                        autoFocus
-                      />
-                    </div>
-                    <div className="flex space-x-2">
-                      <button
-                        onClick={handleCancelComment}
-                        className="flex-1 px-4 py-2 bg-gray-200 text-gray-800 text-sm font-medium rounded-md hover:bg-gray-300"
-                      >
-                        Cancel
-                      </button>
-                      <button
-                        onClick={handleAddComment}
-                        disabled={!commentText.trim() || addCommentMutation.isPending}
-                        className="flex-1 px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-md hover:bg-blue-700 disabled:opacity-50 flex items-center justify-center"
-                      >
-                        {addCommentMutation.isPending ? (
-                          <>
-                            <Loader2 className="h-4 w-4 mr-1 animate-spin" />
-                            Saving...
-                          </>
-                        ) : (
-                          <>
-                            <Plus className="h-4 w-4 mr-1" />
-                            Add Comment
-                          </>
-                        )}
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              )}
 
               {/* General Action Request Input (always visible at bottom) */}
               <div className="border-t p-4">
@@ -654,6 +649,81 @@ export function AppDetail() {
           )}
         </div>
       </div>
+
+      {/* Floating Comment Popup (appears at click position) */}
+      {showCommentForm && popupPosition && (
+        <>
+          {/* Overlay */}
+          <div
+            className="fixed inset-0 bg-black bg-opacity-30 z-40"
+            onClick={handleCancelComment}
+          />
+
+          {/* Popup */}
+          <div
+            className="fixed z-50 bg-white rounded-lg shadow-2xl border-2 border-blue-500"
+            style={{
+              left: `${popupPosition.x}px`,
+              top: `${popupPosition.y}px`,
+              transform: 'translate(-50%, -20px)',
+              minWidth: '320px',
+              maxWidth: '400px',
+            }}
+          >
+            <div className="p-4">
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2">
+                  <div className="w-2 h-2 bg-blue-500 rounded-full" />
+                  <h4 className="text-sm font-semibold text-gray-900">Add Comment</h4>
+                </div>
+                <button
+                  onClick={handleCancelComment}
+                  className="text-gray-400 hover:text-gray-600 text-xl leading-none"
+                >
+                  ×
+                </button>
+              </div>
+
+              <div className="space-y-3">
+                <textarea
+                  value={commentText}
+                  onChange={(e) => setCommentText(e.target.value)}
+                  placeholder="Describe the change you want..."
+                  rows={3}
+                  className="block w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  autoFocus
+                />
+
+                <div className="flex gap-2">
+                  <button
+                    onClick={handleCancelComment}
+                    className="flex-1 px-3 py-2 bg-gray-100 text-gray-700 text-sm font-medium rounded-md hover:bg-gray-200"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleAddComment}
+                    disabled={!commentText.trim() || addCommentMutation.isPending}
+                    className="flex-1 px-3 py-2 bg-blue-600 text-white text-sm font-medium rounded-md hover:bg-blue-700 disabled:opacity-50 flex items-center justify-center"
+                  >
+                    {addCommentMutation.isPending ? (
+                      <>
+                        <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+                        Adding...
+                      </>
+                    ) : (
+                      <>
+                        <Plus className="h-4 w-4 mr-1" />
+                        Add
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </>
+      )}
     </div>
   )
 }
