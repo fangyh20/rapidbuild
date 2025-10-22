@@ -15,6 +15,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/gorilla/mux"
 	"github.com/joho/godotenv"
+	"github.com/redis/go-redis/v9"
 	appConfig "github.com/rapidbuildapp/rapidbuild/config"
 	"github.com/rapidbuildapp/rapidbuild/internal/api"
 	"github.com/rapidbuildapp/rapidbuild/internal/db"
@@ -90,8 +91,28 @@ func main() {
 	uploadService := services.NewUploadService(pgClient, s3Client, cfg)
 	vercelService := services.NewVercelService(cfg)
 
+	// Initialize Redis client (Upstash)
+	var redisClient *redis.Client
+	if cfg.RedisURL != "" {
+		opt, err := redis.ParseURL(cfg.RedisURL)
+		if err != nil {
+			log.Fatalf("Failed to parse Redis URL: %v", err)
+		}
+		redisClient = redis.NewClient(opt)
+
+		// Test connection
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := redisClient.Ping(ctx).Err(); err != nil {
+			log.Fatalf("Failed to connect to Redis: %v", err)
+		}
+		log.Println("Successfully connected to Redis (Upstash)")
+	} else {
+		log.Println("Warning: Redis URL not configured, SSE will not work")
+	}
+
 	// Initialize worker
-	builder := worker.NewBuilder(cfg, appService, versionService, vercelService, s3Client)
+	builder := worker.NewBuilder(cfg, appService, versionService, vercelService, s3Client, redisClient)
 
 	// Initialize API handlers
 	authHandler := api.NewAuthHandler(authService, oauthService, cfg)
@@ -160,7 +181,7 @@ func main() {
 		Addr:         ":" + cfg.Port,
 		Handler:      r,
 		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
+		WriteTimeout: 0, // Disable write timeout for SSE support (long-running connections)
 		IdleTimeout:  60 * time.Second,
 	}
 

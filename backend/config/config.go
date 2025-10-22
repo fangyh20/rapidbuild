@@ -48,6 +48,9 @@ type Config struct {
 
 	// Frontend URL (for email links)
 	FrontendURL string
+
+	// Redis (Upstash - for build progress pub/sub)
+	RedisURL string
 }
 
 func Load() *Config {
@@ -98,6 +101,9 @@ func Load() *Config {
 
 		// Frontend
 		FrontendURL: getEnv("FRONTEND_URL", "http://localhost:5173"),
+
+		// Redis
+		RedisURL: getEnv("REDIS_URL", ""),
 	}
 }
 

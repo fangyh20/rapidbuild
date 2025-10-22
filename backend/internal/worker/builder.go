@@ -17,6 +17,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/redis/go-redis/v9"
 	"github.com/rapidbuildapp/rapidbuild/config"
 	"github.com/rapidbuildapp/rapidbuild/internal/models"
 	"github.com/rapidbuildapp/rapidbuild/internal/services"
@@ -28,17 +29,17 @@ type Builder struct {
 	VersionService *services.VersionService
 	VercelService  *services.VercelService
 	S3Client       *s3.Client
-	ProgressChan   chan models.BuildProgress
+	RedisClient    *redis.Client
 }
 
-func NewBuilder(cfg *config.Config, appService *services.AppService, versionService *services.VersionService, vercelService *services.VercelService, s3Client *s3.Client) *Builder {
+func NewBuilder(cfg *config.Config, appService *services.AppService, versionService *services.VersionService, vercelService *services.VercelService, s3Client *s3.Client, redisClient *redis.Client) *Builder {
 	return &Builder{
 		Config:         cfg,
 		AppService:     appService,
 		VersionService: versionService,
 		VercelService:  vercelService,
 		S3Client:       s3Client,
-		ProgressChan:   make(chan models.BuildProgress, 100),
+		RedisClient:    redisClient,
 	}
 }
 
@@ -82,6 +83,19 @@ func (b *Builder) BuildApp(ctx context.Context, versionID, appID, requirements s
 	}()
 
 	log.Printf("[BuildApp] Starting build for version %s, app %s\n", versionID, appID)
+
+	// Update status to building immediately
+	_, err := b.VersionService.UpdateVersion(ctx, versionID, map[string]interface{}{
+		"status": "building",
+	})
+	if err != nil {
+		log.Printf("[BuildApp] Warning: Failed to update status to building: %v\n", err)
+	}
+
+	// Wait 2 seconds to allow SSE clients to subscribe before sending first message
+	// This prevents missing initial progress messages due to race condition
+	time.Sleep(2 * time.Second)
+
 	b.sendProgress(versionID, "building", "Starting build process...")
 
 	// Create workspace using appID for easier troubleshooting
@@ -768,10 +782,30 @@ func (b *Builder) deployToVercel(ctx context.Context, workspaceDir, appID, versi
 }
 
 func (b *Builder) sendProgress(versionID, status, message string) {
-	b.ProgressChan <- models.BuildProgress{
+	// Check if Redis is configured
+	if b.RedisClient == nil {
+		log.Printf("[Redis] Warning: RedisClient is nil, cannot send progress for version %s\n", versionID)
+		return
+	}
+
+	progress := models.BuildProgress{
 		VersionID: versionID,
 		Status:    status,
 		Message:   message,
+		Timestamp: time.Now(),
+	}
+
+	// Publish to Redis channel for this version
+	data, err := json.Marshal(progress)
+	if err != nil {
+		log.Printf("[Redis] Failed to marshal progress: %v\n", err)
+		return
+	}
+
+	channel := fmt.Sprintf("build:progress:%s", versionID)
+	err = b.RedisClient.Publish(context.Background(), channel, data).Err()
+	if err != nil {
+		log.Printf("[Redis] Failed to publish progress: %v\n", err)
 	}
 }
 
