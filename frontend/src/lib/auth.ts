@@ -1,6 +1,36 @@
 import axios from 'axios'
+import axiosRetry from 'axios-retry'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8092/api/v1'
+
+// Create axios instance for auth requests with retry logic
+const authAxios = axios.create({
+  baseURL: API_BASE_URL,
+})
+
+// Configure retry logic for auth requests
+axiosRetry(authAxios, {
+  retries: 3, // Number of retry attempts
+  retryDelay: axiosRetry.exponentialDelay, // Exponential backoff delay
+  retryCondition: (error) => {
+    // Retry on network errors or 5xx server errors or 429 (too many requests)
+    // Do NOT retry on 401/403 (auth errors) as those are expected failures
+    return (
+      axiosRetry.isNetworkOrIdempotentRequestError(error) ||
+      error.response?.status === 429 ||
+      (error.response?.status !== undefined &&
+       error.response.status >= 500 &&
+       error.response.status !== 401 &&
+       error.response.status !== 403)
+    )
+  },
+  onRetry: (retryCount, error, requestConfig) => {
+    console.log(
+      `Retrying auth request to ${requestConfig.url} (attempt ${retryCount}/${3})`,
+      error.message
+    )
+  },
+})
 
 export interface User {
   id: string
@@ -38,7 +68,7 @@ class AuthClient {
 
   // Sign up with email and password
   async signup(email: string, password: string, fullName: string) {
-    const response = await axios.post(`${API_BASE_URL}/auth/signup`, {
+    const response = await authAxios.post('/auth/signup', {
       email,
       password,
       full_name: fullName,
@@ -48,7 +78,7 @@ class AuthClient {
 
   // Login with email and password
   async login(email: string, password: string): Promise<AuthResponse> {
-    const response = await axios.post<AuthResponse>(`${API_BASE_URL}/auth/login`, {
+    const response = await authAxios.post<AuthResponse>('/auth/login', {
       email,
       password,
     })
@@ -65,7 +95,7 @@ class AuthClient {
   async logout() {
     try {
       // Call logout endpoint
-      await axios.post(`${API_BASE_URL}/auth/logout`, {}, {
+      await authAxios.post('/auth/logout', {}, {
         headers: this.getAuthHeaders(),
       })
     } catch (error) {
@@ -97,7 +127,7 @@ class AuthClient {
     }
 
     try {
-      const response = await axios.get<User>(`${API_BASE_URL}/auth/me`, {
+      const response = await authAxios.get<User>('/auth/me', {
         headers: this.getAuthHeaders(),
       })
       this.user = response.data
@@ -123,8 +153,8 @@ class AuthClient {
     }
 
     try {
-      const response = await axios.post<{ access_token: string }>(
-        `${API_BASE_URL}/auth/refresh`,
+      const response = await authAxios.post<{ access_token: string }>(
+        '/auth/refresh',
         { refresh_token: this.refreshToken }
       )
 
@@ -140,19 +170,19 @@ class AuthClient {
 
   // Verify email
   async verifyEmail(token: string) {
-    const response = await axios.get(`${API_BASE_URL}/auth/verify-email?token=${token}`)
+    const response = await authAxios.get(`/auth/verify-email?token=${token}`)
     return response.data
   }
 
   // Forgot password
   async forgotPassword(email: string) {
-    const response = await axios.post(`${API_BASE_URL}/auth/forgot-password`, { email })
+    const response = await authAxios.post('/auth/forgot-password', { email })
     return response.data
   }
 
   // Reset password
   async resetPassword(token: string, newPassword: string) {
-    const response = await axios.post(`${API_BASE_URL}/auth/reset-password`, {
+    const response = await authAxios.post('/auth/reset-password', {
       token,
       new_password: newPassword,
     })

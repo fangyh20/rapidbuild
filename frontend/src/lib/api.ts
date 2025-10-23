@@ -1,10 +1,31 @@
 import axios from 'axios'
+import axiosRetry from 'axios-retry'
 import { authClient } from './auth'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8092/api/v1'
 
 export const apiClient = axios.create({
   baseURL: API_BASE_URL,
+})
+
+// Configure retry logic
+axiosRetry(apiClient, {
+  retries: 3, // Number of retry attempts
+  retryDelay: axiosRetry.exponentialDelay, // Exponential backoff delay
+  retryCondition: (error) => {
+    // Retry on network errors or 5xx server errors or 429 (too many requests)
+    return (
+      axiosRetry.isNetworkOrIdempotentRequestError(error) ||
+      error.response?.status === 429 ||
+      (error.response?.status !== undefined && error.response.status >= 500)
+    )
+  },
+  onRetry: (retryCount, error, requestConfig) => {
+    console.log(
+      `Retrying request to ${requestConfig.url} (attempt ${retryCount}/${3})`,
+      error.message
+    )
+  },
 })
 
 // Add auth token to requests
