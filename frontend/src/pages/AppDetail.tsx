@@ -34,6 +34,7 @@ export function AppDetail() {
   const [iframeRef, setIframeRef] = useState<HTMLIFrameElement | null>(null)
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const [popupPosition, setPopupPosition] = useState<{ x: number; y: number } | null>(null)
+  const [versionListRef, setVersionListRef] = useState<HTMLDivElement | null>(null)
 
   const { data: app } = useQuery({
     queryKey: ['app', id],
@@ -328,6 +329,16 @@ export function AppDetail() {
     }
   }, [mode, iframeRef, previewUrl])
 
+  // Auto-scroll version list to bottom to show latest version
+  useEffect(() => {
+    if (versionListRef && versions && versions.length > 0 && activeTab === 'action') {
+      // Scroll to bottom after a short delay to ensure DOM is rendered
+      setTimeout(() => {
+        versionListRef.scrollTop = versionListRef.scrollHeight
+      }, 100)
+    }
+  }, [versions?.length, versionListRef, activeTab])
+
   return (
     <div className="h-screen flex flex-col">
       {/* Header */}
@@ -460,7 +471,7 @@ export function AppDetail() {
           {activeTab === 'action' && (
             <>
               {/* Version History */}
-              <div className="flex-1 overflow-auto p-4">
+              <div ref={setVersionListRef} className="flex-1 overflow-auto p-4">
                 <h3 className="text-sm font-medium text-gray-900 mb-3">Version History</h3>
                 <div className="space-y-3">
                   {versions?.slice().reverse().map((version: Version) => (
